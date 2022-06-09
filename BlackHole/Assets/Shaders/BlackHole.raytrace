@@ -1,0 +1,96 @@
+#include "HLSLSupport.cginc"
+#include "UnityRaytracingMeshUtils.cginc"
+#include "UnityShaderVariables.cginc"
+
+#pragma max_recursion_depth 10
+
+RaytracingAccelerationStructure accelerationStructure : register(t0);
+RWTexture2D<float4> Irradiance;
+TextureCube Space;
+SamplerState sampler_Space;
+
+uniform float4x4 UNITY_MATRIX_I_VP;
+float3 ScreenToWorld(float2 uv)
+{
+	float4 positionCS = float4(uv * 2.0 - 1.0, 0, 1.0);
+	float4 hpositionWS = mul(UNITY_MATRIX_I_VP, positionCS);
+	return hpositionWS.xyz / hpositionWS.w;
+}
+
+struct Payload {
+	float3 irradiance;
+	float atten;
+};
+
+#define PI 3.1415926535
+
+[shader("raygeneration")]
+void Main()
+{
+    uint2 dispatchIdx = DispatchRaysIndex().xy;
+	uint3 dispatchDim = DispatchRaysDimensions();
+
+	float2 uv = (dispatchIdx.xy + 0.5) / float2(dispatchDim.x, dispatchDim.y);
+	float3 rayOrigin = ScreenToWorld(uv);
+
+	float3 viewDir = normalize(rayOrigin - _WorldSpaceCameraPos);
+
+	Payload payload = (Payload)0;
+	payload.irradiance = float3(0, 0, 0);
+	payload.atten = 1;
+
+	float3 p = _WorldSpaceCameraPos;
+    float3 velocity = viewDir;
+
+    float r = length(p);
+    float h2 = length(cross(p, velocity));
+	h2 *= h2;
+
+	bool eventHorizon = false;
+	float step = 0.1;
+	[loop]
+    for (int i = 0; i < 1000; i++) {
+        float3 accel = -1.5 * h2 * p / pow(dot(p, p), 2.5);
+        velocity += accel * step;//accel * step;
+
+		RayDesc ray;
+		ray.Origin = p;
+		ray.Direction = normalize(velocity); 
+		ray.TMin = 0;
+		ray.TMax = length(velocity) * step;
+
+		TraceRay(accelerationStructure, 0, 0xFFFFFFF, 0, 1, 0, ray, payload);
+
+        p += velocity * step;
+		if(length(p) < 1) {
+			eventHorizon = true;
+			break;
+		}
+		if(payload.atten == 0){
+			break;
+		}
+    }
+
+	//RayDesc ray;
+	//ray.Origin = p;
+	//ray.Direction = viewDir; 
+	//ray.TMin = 0;
+	//ray.TMax = 10000;
+	//TraceRay(accelerationStructure, 0, 0xFFFFFFF, 0, 1, 0, ray, payload);
+
+	float3 rayDir = normalize(velocity);
+	float3 space = Space.SampleLevel(sampler_Space, rayDir, 0).rgb * 7000;
+    payload.irradiance += (eventHorizon ? 0 : space) * payload.atten;
+
+    Irradiance[dispatchIdx] = float4(payload.irradiance, 1);
+}
+
+//[shader("miss")]
+//void MissShader(inout Payload payload : SV_RayPayload)
+//{
+//	float3 rayDir = WorldRayDirection();
+//	float lat = atan2(length(rayDir.xy), -rayDir.z) / PI;// *0.5 + 0.5;
+//	float lng = atan2(rayDir.y, rayDir.x) / PI * 0.5 + 0.5;
+//	float3 space = Space.SampleLevel(sampler_Space, float2(lng, lat), 0).rgb;
+//    payload.color += space;
+//}
